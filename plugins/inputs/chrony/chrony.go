@@ -13,6 +13,7 @@ import (
 	"os/user"
 	"path"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,6 +38,7 @@ type Chrony struct {
 	Log         telegraf.Logger `toml:"-"`
 
 	conn   net.Conn
+	mu     sync.Mutex
 	client *fbchrony.Client
 	source string
 	local  string
@@ -216,9 +218,25 @@ func (c *Chrony) Gather(acc telegraf.Accumulator) error {
 	return nil
 }
 
+// communicate uses the configured Timeout as a deadline for the chrony request.
+// The deadline covers the call to client.Communicate(); request, response and
+// response decoding.
+func (c *Chrony) communicate(packet fbchrony.RequestPacket) (fbchrony.ResponsePacket, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.Timeout > 0 {
+		if err := c.conn.SetDeadline(time.Now().Add(time.Duration(c.Timeout))); err != nil {
+			return nil, err
+		}
+		defer c.conn.SetDeadline(time.Time{})
+	}
+	return c.client.Communicate(packet)
+}
+
 func (c *Chrony) gatherActivity(acc telegraf.Accumulator) error {
 	req := fbchrony.NewActivityPacket()
-	r, err := c.client.Communicate(req)
+	r, err := c.communicate(req)
 	if err != nil {
 		return fmt.Errorf("querying activity data failed: %w", err)
 	}
@@ -246,7 +264,7 @@ func (c *Chrony) gatherActivity(acc telegraf.Accumulator) error {
 
 func (c *Chrony) gatherTracking(acc telegraf.Accumulator) error {
 	req := fbchrony.NewTrackingPacket()
-	r, err := c.client.Communicate(req)
+	r, err := c.communicate(req)
 	if err != nil {
 		return fmt.Errorf("querying tracking data failed: %w", err)
 	}
@@ -295,7 +313,7 @@ func (c *Chrony) gatherTracking(acc telegraf.Accumulator) error {
 
 func (c *Chrony) gatherServerStats(acc telegraf.Accumulator) error {
 	req := fbchrony.NewServerStatsPacket()
-	r, err := c.client.Communicate(req)
+	r, err := c.communicate(req)
 	if err != nil {
 		return fmt.Errorf("querying server statistics failed: %w", err)
 	}
@@ -371,7 +389,7 @@ func (c *Chrony) gatherServerStats(acc telegraf.Accumulator) error {
 
 func (c *Chrony) getSourceName(ip net.IP) (string, error) {
 	sourceNameReq := fbchrony.NewNTPSourceNamePacket(ip)
-	sourceNameRaw, err := c.client.Communicate(sourceNameReq)
+	sourceNameRaw, err := c.communicate(sourceNameReq)
 	if err != nil {
 		return "", fmt.Errorf("querying name of source %q failed: %w", ip, err)
 	}
@@ -389,7 +407,7 @@ func (c *Chrony) getSourceName(ip net.IP) (string, error) {
 
 func (c *Chrony) gatherSources(acc telegraf.Accumulator) error {
 	sourcesReq := fbchrony.NewSourcesPacket()
-	sourcesRaw, err := c.client.Communicate(sourcesReq)
+	sourcesRaw, err := c.communicate(sourcesReq)
 	if err != nil {
 		return fmt.Errorf("querying sources failed: %w", err)
 	}
@@ -402,7 +420,7 @@ func (c *Chrony) gatherSources(acc telegraf.Accumulator) error {
 	for idx := int32(0); int(idx) < sourcesResp.NSources; idx++ {
 		// Getting the source data
 		sourceDataReq := fbchrony.NewSourceDataPacket(idx)
-		sourceDataRaw, err := c.client.Communicate(sourceDataReq)
+		sourceDataRaw, err := c.communicate(sourceDataReq)
 		if err != nil {
 			return fmt.Errorf("querying data for source %d failed: %w", idx, err)
 		}
@@ -458,7 +476,7 @@ func (c *Chrony) gatherSources(acc telegraf.Accumulator) error {
 
 func (c *Chrony) gatherSourceStats(acc telegraf.Accumulator) error {
 	sourcesReq := fbchrony.NewSourcesPacket()
-	sourcesRaw, err := c.client.Communicate(sourcesReq)
+	sourcesRaw, err := c.communicate(sourcesReq)
 	if err != nil {
 		return fmt.Errorf("querying sources failed: %w", err)
 	}
@@ -471,7 +489,7 @@ func (c *Chrony) gatherSourceStats(acc telegraf.Accumulator) error {
 	for idx := int32(0); int(idx) < sourcesResp.NSources; idx++ {
 		// Getting the source data
 		sourceStatsReq := fbchrony.NewSourceStatsPacket(idx)
-		sourceStatsRaw, err := c.client.Communicate(sourceStatsReq)
+		sourceStatsRaw, err := c.communicate(sourceStatsReq)
 		if err != nil {
 			return fmt.Errorf("querying data for source %d failed: %w", idx, err)
 		}
